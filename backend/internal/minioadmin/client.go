@@ -329,6 +329,30 @@ func (c *SessionClient) CreateUser(ctx context.Context, user, secret string, rol
 	return nil
 }
 
+func (c *SessionClient) UpdateUserRole(ctx context.Context, user string, role domain.AdminRole) error {
+	currentPolicies, err := c.currentDirectPoliciesForUser(ctx, user)
+	if err != nil {
+		return err
+	}
+
+	desiredPolicies := filterRolePoliciesOut(currentPolicies)
+	switch role {
+	case "", domain.RoleUser:
+		role = domain.RoleUser
+	case domain.RoleGlobalAdmin, domain.RoleReadOnlyAdmin:
+		policyName, ensureErr := c.ensureManagedRolePolicy(ctx, role)
+		if ensureErr != nil {
+			return fmt.Errorf("ensure managed role policy: %w", ensureErr)
+		}
+		desiredPolicies = append(desiredPolicies, policyName)
+	default:
+		return fmt.Errorf("unsupported role: %s", role)
+	}
+
+	sort.Strings(desiredPolicies)
+	return c.reconcilePolicies(ctx, currentPolicies, desiredPolicies, user, "")
+}
+
 func (c *SessionClient) SetUserStatus(ctx context.Context, user, status string) error {
 	state := madmin.AccountEnabled
 	if strings.EqualFold(status, "disabled") {
@@ -1131,4 +1155,24 @@ func containsString(items []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func isRolePolicy(policy string) bool {
+	switch policy {
+	case builtinGlobalAdminPolicyName, managedGlobalAdminPolicyName, managedReadOnlyPolicyName:
+		return true
+	default:
+		return false
+	}
+}
+
+func filterRolePoliciesOut(policies []string) []string {
+	filtered := make([]string, 0, len(policies))
+	for _, policy := range normalizeStrings(policies) {
+		if isRolePolicy(policy) {
+			continue
+		}
+		filtered = append(filtered, policy)
+	}
+	return filtered
 }

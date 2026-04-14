@@ -228,6 +228,10 @@ func (s *Service) CreateUser(ctx context.Context, client *minioadmin.SessionClie
 	return client.CreateUser(ctx, user, secret, role)
 }
 
+func (s *Service) UpdateUserRole(ctx context.Context, client *minioadmin.SessionClient, user string, role domain.AdminRole) error {
+	return client.UpdateUserRole(ctx, user, role)
+}
+
 func (s *Service) SetUserStatus(ctx context.Context, client *minioadmin.SessionClient, user, status string) error {
 	return client.SetUserStatus(ctx, user, status)
 }

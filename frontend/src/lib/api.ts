@@ -129,6 +129,12 @@ export const api = {
   effectivePermissions(token: string, user: string) {
     return request<EffectivePermissionRow[]>(`/api/users/${user}/effective-permissions`, {}, token)
   },
+  setUserRole(token: string, user: string, role: AdminRole) {
+    return request<{ success: boolean }>(`/api/users/${user}/role`, {
+      method: 'PATCH',
+      body: JSON.stringify({ role }),
+    }, token)
+  },
   setUserStatus(token: string, user: string, status: string) {
     return request<{ success: boolean }>(`/api/users/${user}/status`, {
       method: 'PATCH',

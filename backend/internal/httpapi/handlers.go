@@ -57,6 +57,7 @@ func (h *Handler) Router() *gin.Engine {
 	auth.GET("/users/:user", h.getUser)
 	auth.GET("/users/:user/dependencies", h.getUserDependencies)
 	auth.GET("/users/:user/effective-permissions", h.getUserEffectivePermissions)
+	auth.PATCH("/users/:user/role", h.patchUserRole)
 	auth.PATCH("/users/:user/status", h.patchUserStatus)
 	auth.DELETE("/users/:user", h.deleteUser)
 	auth.PUT("/users/:user/bucket-permissions", h.putUserPermissions)
@@ -348,6 +349,21 @@ func (h *Handler) getUserEffectivePermissions(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": h.service.EffectivePermissions(user, groups, buckets)})
+}
+
+func (h *Handler) patchUserRole(c *gin.Context) {
+	var req struct {
+		Role domain.AdminRole `json:"role"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, domain.APIError{Code: "bad_request", Message: "请求参数错误"})
+		return
+	}
+	user := c.Param("user")
+	ctx, cancel := h.timeoutContext(c)
+	defer cancel()
+	err := h.service.UpdateUserRole(ctx, mustMinIO(c), user, req.Role)
+	h.writeMutation(c, err, mustSession(c).Username, "set_user_role", "user", user, "Set user role to "+string(req.Role))
 }
 
 func (h *Handler) patchUserStatus(c *gin.Context) {

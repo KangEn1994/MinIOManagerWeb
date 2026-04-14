@@ -1,6 +1,6 @@
 import './App.css'
 import { startTransition, useDeferredValue, useEffect, useMemo, useState } from 'react'
-import type { Dispatch, SetStateAction } from 'react'
+import type { Dispatch, ReactNode, SetStateAction } from 'react'
 import { api, ApiError } from './lib/api'
 import type {
   AccessKeySummary,
@@ -116,6 +116,7 @@ function App() {
     password: '',
     role: 'user',
   })
+  const [userRoleDraft, setUserRoleDraft] = useState<AdminRole>('user')
   const [userSearch, setUserSearch] = useState('')
   const [userPermissionDraft, setUserPermissionDraft] = useState<Record<string, PermissionTemplate>>({})
   const [batchUserTargets, setBatchUserTargets] = useState('')
@@ -267,6 +268,7 @@ function App() {
       return
     }
     setUserPermissionDraft(bindingsToMap(currentUser.directPermissions))
+    setUserRoleDraft(currentUser.role)
   }, [currentUser])
 
   useEffect(() => {
@@ -823,6 +825,29 @@ function App() {
     }
   }
 
+  async function saveUserRole() {
+    if (!session?.sessionId || !currentUser || !canWrite) return
+    if (userRoleDraft === currentUser.role) {
+      pushNotification('info', '角色没有变化')
+      return
+    }
+    openDialog({
+      title: '更新用户角色',
+      description: `将把用户 ${currentUser.name} 的角色从 ${roleLabel(currentUser.role)} 调整为 ${roleLabel(userRoleDraft)}。`,
+      tone: 'warning',
+      confirmLabel: '更新角色',
+      cancelLabel: '取消',
+      onConfirm: async () => {
+        await withLoading(`action:user-role:${currentUser.name}`, async () =>
+          api.setUserRole(session.sessionId, currentUser.name, userRoleDraft),
+        )
+        pushNotification('ok', '用户角色已更新')
+        await loadUsersPage()
+        await loadUserDetails(currentUser.name, userDetailTab === 'audit')
+      },
+    })
+  }
+
   async function deleteUser(user: string, mode: 'safe' | 'force') {
     if (!session?.sessionId || !canWrite) return
     await performConfirmableMutation({
@@ -1216,31 +1241,39 @@ function App() {
       />
 
       <aside className={sidebarOpen ? 'sidebar open' : 'sidebar'}>
-        <div>
-          <p className="eyebrow">MinIO Manager Web</p>
-          <h2>控制台</h2>
-          <p className="muted sidebar-note">当前角色：{currentRoleLabel}</p>
-          {!canWrite && <p className="sidebar-hint">只读管理员模式下，所有写操作都会被禁用。</p>}
-        </div>
-        <nav className="nav-list">
-          {tabs.map((tab) => (
-            <button
-              key={tab.key}
-              className={tab.key === activeTab ? 'nav-item active' : 'nav-item'}
-              onClick={() => requestTabChange(tab.key)}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-footer">
-          <div>
-            <div className="muted">当前账号</div>
-            <strong>{session.username}</strong>
-          </div>
-          <button className="ghost" onClick={requestLogout} disabled={isLoading('action:logout')}>
-            退出
-          </button>
+        <div className="sidebar-stack">
+          <SidebarSection title="控制台">
+            <p className="eyebrow">MinIO Manager Web</p>
+            <h2>控制台</h2>
+            <p className="muted sidebar-note">当前角色：{currentRoleLabel}</p>
+            {!canWrite && <p className="sidebar-hint">只读管理员模式下，所有写操作都会被禁用。</p>}
+          </SidebarSection>
+
+          <SidebarSection title="导航菜单">
+            <nav className="nav-list">
+              {tabs.map((tab) => (
+                <button
+                  key={tab.key}
+                  className={tab.key === activeTab ? 'nav-item active' : 'nav-item'}
+                  onClick={() => requestTabChange(tab.key)}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </nav>
+          </SidebarSection>
+
+          <SidebarSection title="当前会话">
+            <div className="sidebar-account">
+              <div>
+                <div className="muted">当前账号</div>
+                <strong>{session.username}</strong>
+              </div>
+              <button className="ghost" onClick={requestLogout} disabled={isLoading('action:logout')}>
+                退出
+              </button>
+            </div>
+          </SidebarSection>
         </div>
       </aside>
 
@@ -1266,18 +1299,19 @@ function App() {
 
         {activeTab === 'dashboard' && (
           <section className="content-grid">
-            <div className="card stats-grid">
+            <SectionBlock title="实例概览" hint="把核心数字拆成一个独立条块，便于快速浏览。" className="stats-grid">
               <StatCard label="Buckets" value={dashboard?.health.bucketCount ?? 0} />
               <StatCard label="Users" value={dashboard?.health.userCount ?? 0} />
               <StatCard label="Groups" value={dashboard?.health.groupCount ?? 0} />
               <StatCard label="Audit Logs" value={dashboard?.health.auditCount ?? 0} />
-            </div>
+            </SectionBlock>
 
-            <div className="card wide">
-              <div className="card-header">
-                <h3>系统健康</h3>
-                <span className="chip success">{systemHealth?.mode || 'unknown'}</span>
-              </div>
+            <SectionBlock
+              title="系统健康"
+              hint="实例状态、容量和部署检查分开收纳。"
+              className="wide"
+              trailing={<span className="chip success">{systemHealth?.mode || 'unknown'}</span>}
+            >
               <div className="info-grid">
                 <InfoItem label="版本" value={systemHealth?.version || '-'} />
                 <InfoItem label="部署 ID" value={systemHealth?.deploymentId || '-'} />
@@ -1288,19 +1322,13 @@ function App() {
               </div>
               <Checklist title="健康检查" items={systemHealth?.checks ?? []} />
               <Checklist title="初始化向导 / 部署检查" items={systemHealth?.setupChecklist ?? []} />
-            </div>
+            </SectionBlock>
 
-            <div className="card wide">
-              <div className="card-header">
-                <h3>活动会话</h3>
-              </div>
+            <SectionBlock title="活动会话" className="wide">
               <SessionTable items={sessions} canWrite={canWrite} onRevoke={revokeSession} loadingKeys={loadingKeys} />
-            </div>
+            </SectionBlock>
 
-            <div className="card wide">
-              <div className="card-header">
-                <h3>配置快照</h3>
-              </div>
+            <SectionBlock title="配置快照" className="wide">
               <div className="action-row">
                 <button className="primary" disabled={!canWrite || isLoading('action:export-snapshot')} onClick={() => void exportSnapshot()}>
                   导出快照
@@ -1322,36 +1350,26 @@ function App() {
                   恢复快照
                 </button>
               </div>
-            </div>
+            </SectionBlock>
 
-            <div className="card wide">
-              <div className="card-header">
-                <h3>最近操作</h3>
-              </div>
+            <SectionBlock title="最近操作" className="wide">
               <AuditTable items={dashboard?.recentAudits ?? []} onResourceClick={handleAuditResourceClick} />
-            </div>
+            </SectionBlock>
           </section>
         )}
 
         {activeTab === 'buckets' && (
           <section className="content-grid">
-            <div className="card">
-              <div className="card-header">
-                <h3>新建桶</h3>
-              </div>
+            <SectionBlock title="新建桶">
               <div className="inline-form">
                 <input value={bucketName} onChange={(event) => setBucketName(event.target.value)} placeholder="bucket-name" />
                 <button className="primary" disabled={!canWrite || isLoading('action:create-bucket')} onClick={() => void createBucket()}>
                   创建
                 </button>
               </div>
-            </div>
+            </SectionBlock>
 
-            <div className="card wide">
-              <div className="card-header">
-                <h3>桶列表</h3>
-                <span className="muted">把状态展示和策略编辑拆开，减少误操作。</span>
-              </div>
+            <SectionBlock title="桶列表" hint="把状态展示和策略编辑拆开，减少误操作。" className="wide">
               <table className="table">
                 <thead>
                   <tr>
@@ -1409,20 +1427,18 @@ function App() {
                   ))}
                 </tbody>
               </table>
-            </div>
+            </SectionBlock>
 
-            <div className="card wide">
-              <div className="card-header">
-                <div>
-                  <h3>高级桶策略</h3>
-                  <p className="muted">
-                    {editingBucketPolicy
-                      ? `当前桶：${editingBucketPolicy.bucket}，识别状态：${editingBucketPolicy.visibility}`
-                      : '从桶列表进入“高级策略”，即可查看或编辑原始 JSON。'}
-                  </p>
-                </div>
-                {isBucketPolicyDirty && <span className="chip warning">未保存</span>}
-              </div>
+            <SectionBlock
+              title="高级桶策略"
+              hint={
+                editingBucketPolicy
+                  ? `当前桶：${editingBucketPolicy.bucket}，识别状态：${editingBucketPolicy.visibility}`
+                  : '从桶列表进入“高级策略”，即可查看或编辑原始 JSON。'
+              }
+              className="wide"
+              trailing={isBucketPolicyDirty ? <span className="chip warning">未保存</span> : null}
+            >
               {editingBucketPolicy ? (
                 <div className="stack-form">
                   <textarea
@@ -1456,13 +1472,13 @@ function App() {
               ) : (
                 <EmptyState title="选择一个桶" description="先从上方桶列表进入高级策略编辑。" />
               )}
-            </div>
+            </SectionBlock>
           </section>
         )}
 
         {activeTab === 'users' && (
           <section className={`content-grid users-layout ${userPaneMode === 'detail' ? 'mobile-detail' : 'mobile-list'}`}>
-            <div className="card master-pane">
+            <SectionBlock title="用户菜单" hint="左侧单独作为列表下拉条，右侧聚焦详情。" className="master-pane" defaultOpen>
               <div className="card-header">
                 <h3>用户</h3>
                 <input value={userSearch} onChange={(event) => setUserSearch(event.target.value)} placeholder="搜索用户" />
@@ -1496,9 +1512,14 @@ function App() {
                   </button>
                 ))}
               </div>
-            </div>
+            </SectionBlock>
 
-            <div className="card wide detail-pane">
+            <SectionBlock
+              title="核心窗体"
+              hint={currentUser ? `当前用户：${currentUser.name}` : '请选择左侧用户进入详情。'}
+              className="wide detail-pane"
+              defaultOpen
+            >
               {currentUser ? (
                 <>
                   <div className="detail-header">
@@ -1533,6 +1554,28 @@ function App() {
                     <SummaryCard label="分组数" value={String(currentUser.memberOf.length)} />
                     <SummaryCard label="Access Keys" value={String(accessKeys.length)} />
                   </div>
+
+                  <SectionBlock title="角色管理" hint="已有用户也可以提升为全局管理员或切换为只读管理员。">
+                    <div className="role-editor">
+                      <select value={userRoleDraft} onChange={(event) => setUserRoleDraft(event.target.value as AdminRole)}>
+                        {roleOptions.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="muted role-editor-copy">
+                        {roleOptions.find((option) => option.value === userRoleDraft)?.description}
+                      </div>
+                      <button
+                        className="primary"
+                        disabled={!canWrite || isLoading(`action:user-role:${currentUser.name}`)}
+                        onClick={() => void saveUserRole()}
+                      >
+                        更新角色
+                      </button>
+                    </div>
+                  </SectionBlock>
 
                   <div className="subtabs">
                     {userDetailTabs.map((tab) => (
@@ -1677,13 +1720,13 @@ function App() {
               ) : (
                 <EmptyState title="选择一个用户" description="从左侧选择用户后，可管理权限、状态、依赖和 Access Key。" />
               )}
-            </div>
+            </SectionBlock>
           </section>
         )}
 
         {activeTab === 'groups' && (
           <section className={`content-grid users-layout ${groupPaneMode === 'detail' ? 'mobile-detail' : 'mobile-list'}`}>
-            <div className="card master-pane">
+            <SectionBlock title="分组菜单" hint="左侧作为分组列表条。" className="master-pane" defaultOpen>
               <div className="card-header">
                 <h3>分组</h3>
                 <input value={groupSearch} onChange={(event) => setGroupSearch(event.target.value)} placeholder="搜索分组" />
@@ -1706,9 +1749,14 @@ function App() {
                   </button>
                 ))}
               </div>
-            </div>
+            </SectionBlock>
 
-            <div className="card wide detail-pane">
+            <SectionBlock
+              title="核心窗体"
+              hint={currentGroup ? `当前分组：${currentGroup.name}` : '请选择左侧分组进入详情。'}
+              className="wide detail-pane"
+              defaultOpen
+            >
               {currentGroup ? (
                 <>
                   <div className="detail-header">
@@ -1760,16 +1808,13 @@ function App() {
               ) : (
                 <EmptyState title="选择一个分组" description="从左侧选择分组后，可管理成员和桶权限模板。" />
               )}
-            </div>
+            </SectionBlock>
           </section>
         )}
 
         {activeTab === 'audit' && (
           <section className="content-grid">
-            <div className="card">
-              <div className="card-header">
-                <h3>筛选</h3>
-              </div>
+            <SectionBlock title="筛选条件">
               <div className="quick-filters">
                 {auditRangeOptions.map((option) => (
                   <button
@@ -1802,15 +1847,11 @@ function App() {
                   导出当前 CSV
                 </button>
               </div>
-            </div>
+            </SectionBlock>
 
-            <div className="card wide">
-              <div className="card-header">
-                <h3>审计日志</h3>
-                <span className="muted">点击资源可跳到对应的用户、分组或桶。</span>
-              </div>
+            <SectionBlock title="审计日志" hint="点击资源可跳到对应的用户、分组或桶。" className="wide">
               <AuditTable items={visibleAudits} onResourceClick={handleAuditResourceClick} />
-            </div>
+            </SectionBlock>
           </section>
         )}
       </main>
@@ -1824,6 +1865,47 @@ function StatCard({ label, value }: { label: string; value: number }) {
       <span className="muted">{label}</span>
       <strong>{value}</strong>
     </div>
+  )
+}
+
+function SidebarSection({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="sidebar-section">
+      <div className="sidebar-section-title">{title}</div>
+      <div className="sidebar-section-body">{children}</div>
+    </section>
+  )
+}
+
+function SectionBlock({
+  title,
+  hint,
+  children,
+  trailing,
+  className = '',
+  defaultOpen = true,
+}: {
+  title: string
+  hint?: string
+  children: ReactNode
+  trailing?: ReactNode
+  className?: string
+  defaultOpen?: boolean
+}) {
+  return (
+    <details className={`card section-block ${className}`.trim()} open={defaultOpen}>
+      <summary className="section-summary">
+        <div>
+          <h3>{title}</h3>
+          {hint ? <p className="muted section-hint">{hint}</p> : null}
+        </div>
+        <div className="section-summary-right">
+          {trailing}
+          <span className="section-caret">展开/收起</span>
+        </div>
+      </summary>
+      <div className="section-body">{children}</div>
+    </details>
   )
 }
 

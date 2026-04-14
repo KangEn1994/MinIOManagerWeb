@@ -7,7 +7,8 @@
 .sidebar {
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
+  justify-content: flex-start;
+  gap: 16px;
   padding: 28px;
   background:
     radial-gradient(circle at top left, rgba(252, 163, 17, 0.24), transparent 30%),
@@ -15,6 +16,33 @@
   color: #f8fafc;
   border-right: 1px solid rgba(255, 255, 255, 0.08);
   z-index: 30;
+}
+
+.sidebar-stack {
+  display: grid;
+  gap: 14px;
+  align-content: start;
+}
+
+.sidebar-section {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.sidebar-section-title {
+  font-size: 0.78rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #fca311;
+}
+
+.sidebar-section-body {
+  display: grid;
+  gap: 10px;
 }
 
 .sidebar h2,
@@ -42,7 +70,7 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  margin-top: 28px;
+  margin-top: 0;
 }
 
 .nav-item,
@@ -68,20 +96,20 @@
   transform: translateX(4px);
 }
 
-.sidebar-footer {
+.sidebar-account {
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
 }
 
-.sidebar-footer .ghost {
+.sidebar-account .ghost {
   background: rgba(255, 255, 255, 0.08);
   color: #f8fafc;
   border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
-.sidebar-footer .ghost:hover {
+.sidebar-account .ghost:hover {
   background: rgba(255, 255, 255, 0.14);
 }
 
@@ -156,6 +184,49 @@
   padding: 20px;
   box-shadow: 0 18px 60px rgba(15, 23, 42, 0.08);
   backdrop-filter: blur(10px);
+}
+
+.section-block {
+  padding: 0;
+  overflow: hidden;
+}
+
+.section-summary {
+  list-style: none;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 18px 20px;
+  cursor: pointer;
+  background: linear-gradient(180deg, rgba(255, 248, 235, 0.96), rgba(255, 255, 255, 0.9));
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.section-summary::-webkit-details-marker {
+  display: none;
+}
+
+.section-summary-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.section-caret {
+  font-size: 0.82rem;
+  color: #64748b;
+  white-space: nowrap;
+}
+
+.section-hint {
+  margin: 6px 0 0;
+}
+
+.section-body {
+  display: grid;
+  gap: 18px;
+  padding: 20px;
 }
 
 .subcard {
@@ -273,6 +344,21 @@
 
 .form-panel {
   margin-bottom: 8px;
+}
+
+.role-editor {
+  display: grid;
+  gap: 10px;
+  max-width: 420px;
+}
+
+.role-editor-copy {
+  line-height: 1.5;
+}
+
+.master-pane .section-body,
+.detail-pane .section-body {
+  gap: 16px;
 }
 
 .stack-block {
@@ -716,7 +802,8 @@ textarea {
   }
 
   .topbar,
-  .detail-header {
+  .detail-header,
+  .section-summary {
     flex-direction: column;
     align-items: stretch;
   }
