@@ -8,6 +8,7 @@ services:
       - "19000:9000"
       - "19001:9001"
     environment:
+      TZ: Asia/Shanghai
       MINIO_ROOT_USER: admin
       MINIO_ROOT_PASSWORD: change-this-password
       MINIO_REGION: us-east-1
@@ -23,6 +24,7 @@ services:
     ports:
       - "18080:8080"
     environment:
+      TZ: Asia/Shanghai
       APP_NAME: MinIO Manager Web
       BIND_ADDRESS: :8080
       BASE_URL: https://minio-manager.example.com

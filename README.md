@@ -73,6 +73,7 @@ cp .env.example .env
 APP_NAME=MinIO Manager Web
 BIND_ADDRESS=:8080
 BASE_URL=https://minio-manager.example.com
+TZ=Asia/Shanghai
 APP_MASTER_KEY=replace-with-a-random-string-at-least-32-characters
 SQLITE_PATH=./data/minio-manager.db
 FRONTEND_DIST_DIR=/app/frontend/dist
@@ -88,6 +89,7 @@ MINIO_REGION=us-east-1
 
 说明：
 
+- `TZ=Asia/Shanghai` 表示容器默认使用东八区
 - `MINIO_ENDPOINT` 填你自己的 MinIO API 域名、内网地址或 compose 服务名
 - `MINIO_ENDPOINT` 不要带 `http://` 或 `https://`
 - 如果 MinIO API 走 HTTPS，就把 `MINIO_USE_SSL=true`
@@ -125,6 +127,7 @@ services:
       - "19000:9000"
       - "19001:9001"
     environment:
+      TZ: Asia/Shanghai
       MINIO_ROOT_USER: admin
       MINIO_ROOT_PASSWORD: change-this-password
       MINIO_REGION: us-east-1
@@ -140,6 +143,7 @@ services:
     ports:
       - "18080:8080"
     environment:
+      TZ: Asia/Shanghai
       APP_NAME: MinIO Manager Web
       BIND_ADDRESS: :8080
       BASE_URL: https://minio-manager.example.com
@@ -187,6 +191,10 @@ openssl rand -base64 48
 - `BASE_URL`
   - 你的管理后台访问地址
   - 例如 `https://minio-manager.example.com`
+
+- `TZ`
+  - 容器时区，建议固定为 `Asia/Shanghai`
+  - 对应东八区
 
 - `MINIO_ENDPOINT`
   - 如果和 MinIO 在同一个 compose 里，填 `minio:9000`
@@ -260,6 +268,7 @@ registry.example.com/team/minio-manager-web:latest
     ports:
       - "18080:8080"
     environment:
+      TZ: Asia/Shanghai
       APP_NAME: MinIO Manager Web
       BIND_ADDRESS: :8080
       BASE_URL: https://minio-manager.example.com
