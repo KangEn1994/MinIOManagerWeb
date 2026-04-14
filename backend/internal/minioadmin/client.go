@@ -187,9 +187,9 @@ func (c *SessionClient) ListUsers(ctx context.Context) ([]domain.UserSummary, er
 		out = append(out, domain.UserSummary{
 			Name:              name,
 			Status:            string(info.Status),
-			MemberOf:          info.MemberOf,
-			DirectPermissions: direct,
-			FinalPermissions:  final,
+			MemberOf:          normalizeStrings(info.MemberOf),
+			DirectPermissions: normalizePermissionBindings(direct),
+			FinalPermissions:  normalizePermissionBindings(final),
 		})
 	}
 	return out, nil
@@ -207,9 +207,9 @@ func (c *SessionClient) GetUser(ctx context.Context, user string) (domain.UserSu
 	return domain.UserSummary{
 		Name:              user,
 		Status:            string(info.Status),
-		MemberOf:          info.MemberOf,
-		DirectPermissions: direct,
-		FinalPermissions:  final,
+		MemberOf:          normalizeStrings(info.MemberOf),
+		DirectPermissions: normalizePermissionBindings(direct),
+		FinalPermissions:  normalizePermissionBindings(final),
 	}, nil
 }
 
@@ -258,8 +258,8 @@ func (c *SessionClient) ListGroups(ctx context.Context) ([]domain.GroupSummary, 
 		out = append(out, domain.GroupSummary{
 			Name:        name,
 			Status:      desc.Status,
-			Members:     desc.Members,
-			Permissions: perms,
+			Members:     normalizeStrings(desc.Members),
+			Permissions: normalizePermissionBindings(perms),
 		})
 	}
 	return out, nil
@@ -741,4 +741,18 @@ func mapBindings(in map[string]domain.PermissionBinding) []domain.PermissionBind
 		return out[i].Bucket < out[j].Bucket
 	})
 	return out
+}
+
+func normalizeStrings(items []string) []string {
+	if items == nil {
+		return []string{}
+	}
+	return items
+}
+
+func normalizePermissionBindings(items []domain.PermissionBinding) []domain.PermissionBinding {
+	if items == nil {
+		return []domain.PermissionBinding{}
+	}
+	return items
 }

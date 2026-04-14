@@ -132,14 +132,14 @@ function App() {
 
   useEffect(() => {
     if (currentUser) {
-      setUserPermissionDraft(bindingsToMap(currentUser.directPermissions))
+      setUserPermissionDraft(bindingsToMap(currentUser.directPermissions ?? []))
     }
   }, [currentUser])
 
   useEffect(() => {
     if (currentGroup) {
-      setGroupMembersDraft(currentGroup.members.join(', '))
-      setGroupPermissionDraft(bindingsToMap(currentGroup.permissions))
+      setGroupMembersDraft((currentGroup.members ?? []).join(', '))
+      setGroupPermissionDraft(bindingsToMap(currentGroup.permissions ?? []))
     }
   }, [currentGroup])
 
@@ -602,7 +602,7 @@ function App() {
                   <div className="card-header">
                     <div>
                       <h3>{currentUser.name}</h3>
-                      <p className="muted">分组：{currentUser.memberOf.join(', ') || '暂无'}</p>
+                      <p className="muted">分组：{(currentUser.memberOf ?? []).join(', ') || '暂无'}</p>
                     </div>
                     <div className="action-row">
                       <button className="ghost" onClick={() => void setUserStatus(currentUser.name, 'enabled')}>启用</button>
@@ -698,7 +698,7 @@ function App() {
                 {filteredGroups.map((group) => (
                   <button key={group.name} className={group.name === selectedGroup ? 'list-item active' : 'list-item'} onClick={() => setSelectedGroup(group.name)}>
                     <span>{group.name}</span>
-                    <span className="muted">{group.members.length} members</span>
+                    <span className="muted">{(group.members ?? []).length} members</span>
                   </button>
                 ))}
               </div>
@@ -867,7 +867,7 @@ function EmptyState({ title, description }: { title: string; description: string
   )
 }
 
-function bindingsToMap(bindings: PermissionBinding[]) {
+function bindingsToMap(bindings: PermissionBinding[] = []) {
   return bindings.reduce<Record<string, PermissionTemplate>>((acc, item) => {
     acc[item.bucket] = item.template
     return acc

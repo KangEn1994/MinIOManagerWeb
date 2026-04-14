@@ -22,6 +22,23 @@ export class ApiError extends Error {
 
 const baseUrl = import.meta.env.VITE_API_BASE_URL || ''
 
+function normalizeUser(user: UserSummary): UserSummary {
+  return {
+    ...user,
+    memberOf: user.memberOf ?? [],
+    directPermissions: user.directPermissions ?? [],
+    finalPermissions: user.finalPermissions ?? [],
+  }
+}
+
+function normalizeGroup(group: GroupSummary): GroupSummary {
+  return {
+    ...group,
+    members: group.members ?? [],
+    permissions: group.permissions ?? [],
+  }
+}
+
 async function request<T>(path: string, options: RequestInit = {}, token?: string): Promise<T> {
   const response = await fetch(`${baseUrl}${path}`, {
     ...options,
@@ -73,7 +90,7 @@ export const api = {
     return request<{ success: boolean }>(`/api/buckets/${bucket}${suffix}`, { method: 'DELETE' }, token)
   },
   users(token: string) {
-    return request<UserSummary[]>('/api/users', {}, token)
+    return request<UserSummary[]>('/api/users', {}, token).then((items) => items.map(normalizeUser))
   },
   createUser(token: string, name: string, password: string) {
     return request<{ success: boolean }>('/api/users', {
@@ -101,7 +118,7 @@ export const api = {
     }, token)
   },
   groups(token: string) {
-    return request<GroupSummary[]>('/api/groups', {}, token)
+    return request<GroupSummary[]>('/api/groups', {}, token).then((items) => items.map(normalizeGroup))
   },
   createGroup(token: string, name: string) {
     return request<{ success: boolean }>('/api/groups', {
