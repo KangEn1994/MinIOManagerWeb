@@ -1,0 +1,13 @@
+services:
+  minio-manager-web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: minio-manager-web
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../backend/data:/app/data
