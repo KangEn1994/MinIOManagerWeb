@@ -32,9 +32,13 @@ type Service struct {
 }
 
 type SessionData struct {
-	SessionID string `json:"sessionId"`
-	Username  string `json:"username"`
-	ExpiresAt time.Time `json:"expiresAt"`
+	SessionID string           `json:"sessionId"`
+	Username  string           `json:"username"`
+	Role      domain.AdminRole `json:"role"`
+	SourceIP  string           `json:"sourceIp"`
+	UserAgent string           `json:"userAgent"`
+	CreatedAt time.Time        `json:"createdAt"`
+	ExpiresAt time.Time        `json:"expiresAt"`
 }
 
 type LoginResult struct {
@@ -54,13 +58,17 @@ func New(cfg config.Config, db *gorm.DB, cipher *security.Cipher) *Service {
 	}
 }
 
-func (s *Service) Login(ctx context.Context, username, password string) (LoginResult, error) {
+func (s *Service) Login(ctx context.Context, username, password, sourceIP, userAgent string) (LoginResult, error) {
 	client, err := s.minio.NewSession(username, password)
 	if err != nil {
 		return LoginResult{}, err
 	}
 	if err := client.ValidateAdmin(ctx); err != nil {
 		return LoginResult{}, fmt.Errorf("%w: %s", ErrUnauthorized, err.Error())
+	}
+	role, err := client.ResolveCurrentRole(ctx, username)
+	if err != nil {
+		return LoginResult{}, err
 	}
 
 	encUser, err := s.cipher.Encrypt(username)
@@ -75,8 +83,12 @@ func (s *Service) Login(ctx context.Context, username, password string) (LoginRe
 	session := store.Session{
 		ID:                 uuid.NewString(),
 		Username:           username,
+		Role:               string(role),
+		SourceIP:           sourceIP,
+		UserAgent:          userAgent,
 		EncryptedAccessKey: encUser,
 		EncryptedSecretKey: encPass,
+		LastSeenAt:         time.Now(),
 		ExpiresAt:          time.Now().Add(s.cfg.SessionTTL),
 	}
 	if err := s.db.Create(&session).Error; err != nil {
@@ -87,6 +99,10 @@ func (s *Service) Login(ctx context.Context, username, password string) (LoginRe
 		SessionData: SessionData{
 			SessionID: session.ID,
 			Username:  session.Username,
+			Role:      role,
+			SourceIP:  sourceIP,
+			UserAgent: userAgent,
+			CreatedAt: session.CreatedAt,
 			ExpiresAt: session.ExpiresAt,
 		},
 	}, nil
@@ -105,6 +121,8 @@ func (s *Service) GetSession(ctx context.Context, sessionID string) (SessionData
 		_ = s.db.WithContext(ctx).Delete(&store.Session{}, "id = ?", sessionID).Error
 		return SessionData{}, nil, ErrUnauthorized
 	}
+	session.LastSeenAt = time.Now()
+	_ = s.db.WithContext(ctx).Model(&store.Session{}).Where("id = ?", session.ID).Update("last_seen_at", session.LastSeenAt).Error
 
 	accessKey, err := s.cipher.Decrypt(session.EncryptedAccessKey)
 	if err != nil {
@@ -122,6 +140,10 @@ func (s *Service) GetSession(ctx context.Context, sessionID string) (SessionData
 	return SessionData{
 		SessionID: session.ID,
 		Username:  session.Username,
+		Role:      domain.AdminRole(session.Role),
+		SourceIP:  session.SourceIP,
+		UserAgent: session.UserAgent,
+		CreatedAt: session.CreatedAt,
 		ExpiresAt: session.ExpiresAt,
 	}, client, nil
 }
@@ -154,17 +176,41 @@ func (s *Service) ListBuckets(ctx context.Context, client *minioadmin.SessionCli
 	return client.ListBuckets(ctx)
 }
 
+func (s *Service) GetBucketPolicy(ctx context.Context, client *minioadmin.SessionClient, bucket string) (domain.BucketPolicy, error) {
+	return client.GetBucketPolicy(ctx, bucket)
+}
+
 func (s *Service) CreateBucket(ctx context.Context, client *minioadmin.SessionClient, name string) error {
 	return client.CreateBucket(ctx, name, s.cfg.MinIORegion)
 }
 
 func (s *Service) SetBucketVisibility(ctx context.Context, client *minioadmin.SessionClient, bucket string, visibility domain.BucketVisibility) error {
+	switch visibility {
+	case domain.BucketVisibilityPrivate, domain.BucketVisibilityPublicRead:
+	case domain.BucketVisibilityCustom:
+		return newAPIError("unsupported_bucket_visibility", "custom 仅用于展示已有自定义桶策略，不能直接通过此开关设置", nil)
+	default:
+		return newAPIError("bad_request", "不支持的桶可见性", map[string]any{"visibility": visibility})
+	}
 	return client.SetBucketVisibility(ctx, bucket, visibility)
+}
+
+func (s *Service) SetBucketPolicy(ctx context.Context, client *minioadmin.SessionClient, bucket, policy string) error {
+	if trimmed := strings.TrimSpace(policy); trimmed != "" {
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+			return newAPIError("invalid_bucket_policy", "桶策略 JSON 无效", nil)
+		}
+	}
+	return client.SetBucketPolicy(ctx, bucket, policy)
 }
 
 func (s *Service) DeleteBucket(ctx context.Context, actor string, client *minioadmin.SessionClient, bucket, confirmationToken string) error {
 	summary := fmt.Sprintf("Delete bucket %s. Only empty buckets can be removed.", bucket)
-	if err := s.requireConfirmation(ctx, actor, domain.ConfirmationDeleteBucket, "bucket", bucket, summary, confirmationToken); err != nil {
+	if safety, err := client.InspectBucketSafety(ctx, bucket); err == nil && safety.DeleteBlocked {
+		summary = fmt.Sprintf("Delete bucket %s. Objects=%d, versions=%d, incomplete uploads=%d.", bucket, safety.ObjectCount, safety.VersionedEntryCount, safety.IncompleteUploadCount)
+	}
+	if err := s.requireConfirmation(ctx, actor, domain.ConfirmationDeleteBucket, "bucket", bucket, summary, bucket, confirmationToken); err != nil {
 		return err
 	}
 	return client.DeleteBucket(ctx, bucket)
@@ -178,8 +224,8 @@ func (s *Service) GetUser(ctx context.Context, client *minioadmin.SessionClient,
 	return client.GetUser(ctx, user)
 }
 
-func (s *Service) CreateUser(ctx context.Context, client *minioadmin.SessionClient, user, secret string) error {
-	return client.CreateUser(ctx, user, secret)
+func (s *Service) CreateUser(ctx context.Context, client *minioadmin.SessionClient, user, secret string, role domain.AdminRole) error {
+	return client.CreateUser(ctx, user, secret, role)
 }
 
 func (s *Service) SetUserStatus(ctx context.Context, client *minioadmin.SessionClient, user, status string) error {
@@ -209,7 +255,7 @@ func (s *Service) DeleteUser(ctx context.Context, actor string, client *minioadm
 	if mode == "force" {
 		confirmationType = domain.ConfirmationForceDeleteUser
 	}
-	if err := s.requireConfirmation(ctx, actor, confirmationType, "user", user, fmt.Sprintf("Delete user %s with mode %s.", user, mode), token); err != nil {
+	if err := s.requireConfirmation(ctx, actor, confirmationType, "user", user, fmt.Sprintf("Delete user %s with mode %s.", user, mode), user, token); err != nil {
 		return err
 	}
 
@@ -238,14 +284,14 @@ func (s *Service) UpdateGroupMembers(ctx context.Context, client *minioadmin.Ses
 }
 
 func (s *Service) UpdateUserPermissions(ctx context.Context, actor string, client *minioadmin.SessionClient, user string, permissions map[string]domain.PermissionTemplate, token string) error {
-	if err := s.requireConfirmation(ctx, actor, domain.ConfirmationOverwritePermissions, "user", user, "Overwrite user bucket permissions.", token); err != nil {
+	if err := s.requireConfirmation(ctx, actor, domain.ConfirmationOverwritePermissions, "user", user, "Overwrite user bucket permissions.", user, token); err != nil {
 		return err
 	}
 	return client.ApplyUserBucketPermissions(ctx, user, permissions)
 }
 
 func (s *Service) UpdateGroupPermissions(ctx context.Context, actor string, client *minioadmin.SessionClient, group string, permissions map[string]domain.PermissionTemplate, token string) error {
-	if err := s.requireConfirmation(ctx, actor, domain.ConfirmationOverwritePermissions, "group", group, "Overwrite group bucket permissions.", token); err != nil {
+	if err := s.requireConfirmation(ctx, actor, domain.ConfirmationOverwritePermissions, "group", group, "Overwrite group bucket permissions.", group, token); err != nil {
 		return err
 	}
 	return client.ApplyGroupBucketPermissions(ctx, group, permissions)
@@ -273,24 +319,10 @@ func (s *Service) SetAccessKeyStatus(ctx context.Context, client *minioadmin.Ses
 }
 
 func (s *Service) DeleteAccessKey(ctx context.Context, actor string, client *minioadmin.SessionClient, accessKey, token string) error {
-	if err := s.requireConfirmation(ctx, actor, domain.ConfirmationDeleteAccessKey, "access_key", accessKey, fmt.Sprintf("Delete access key %s.", accessKey), token); err != nil {
+	if err := s.requireConfirmation(ctx, actor, domain.ConfirmationDeleteAccessKey, "access_key", accessKey, fmt.Sprintf("Delete access key %s.", accessKey), accessKey, token); err != nil {
 		return err
 	}
 	return client.DeleteAccessKey(ctx, accessKey)
-}
-
-func (s *Service) ListAudits(ctx context.Context, limit int) ([]domain.AuditEntry, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 100
-	}
-	var audits []store.AuditLog
-	if err := s.db.WithContext(ctx).
-		Order("created_at desc").
-		Limit(limit).
-		Find(&audits).Error; err != nil {
-		return nil, err
-	}
-	return auditModelsToDomain(audits), nil
 }
 
 func (s *Service) RecordAudit(ctx context.Context, actor, action, resourceType, resourceID, requestSummary, result, sourceIP string) error {
@@ -308,7 +340,7 @@ func (s *Service) RecordAudit(ctx context.Context, actor, action, resourceType, 
 	return s.db.WithContext(ctx).Create(&entry).Error
 }
 
-func (s *Service) requireConfirmation(ctx context.Context, actor string, action domain.ConfirmationType, resourceType, resourceID, summary, token string) error {
+func (s *Service) requireConfirmation(ctx context.Context, actor string, action domain.ConfirmationType, resourceType, resourceID, summary, expected, token string) error {
 	if token != "" {
 		var record store.ConfirmationToken
 		if err := s.db.WithContext(ctx).First(&record, "token = ?", token).Error; err != nil {
@@ -333,6 +365,8 @@ func (s *Service) requireConfirmation(ctx context.Context, actor string, action 
 		ResourceType: resourceType,
 		ResourceID:   resourceID,
 		Summary:      summary,
+		Prompt:       fmt.Sprintf("请输入 %s 以确认继续", expected),
+		Expected:     expected,
 		ExpiresAt:    time.Now().Add(s.cfg.ConfirmationTTL),
 	}
 	if err := s.db.WithContext(ctx).Create(&record).Error; err != nil {
@@ -348,6 +382,8 @@ func (s *Service) requireConfirmation(ctx context.Context, actor string, action 
 				Action:    record.Action,
 				Resource:  record.ResourceID,
 				Summary:   record.Summary,
+				Prompt:    record.Prompt,
+				Expected:  record.Expected,
 				ExpiresAt: record.ExpiresAt,
 			},
 		},
@@ -383,17 +419,8 @@ func newAPIError(code, message string, details map[string]any) error {
 	}
 }
 
-func hasDependencies(deps map[string]any) bool {
-	if memberOf, ok := deps["memberOf"].([]string); ok && len(memberOf) > 0 {
-		return true
-	}
-	if serviceKeys, ok := deps["serviceKeys"].(int); ok && serviceKeys > 0 {
-		return true
-	}
-	if direct, ok := deps["directPolicies"].([]string); ok && len(direct) > 0 {
-		return true
-	}
-	return false
+func hasDependencies(deps domain.UserDependencyDetails) bool {
+	return len(deps.MemberOf) > 0 || len(deps.ServiceKeys) > 0 || len(deps.DirectPolicies) > 0
 }
 
 func auditModelsToDomain(in []store.AuditLog) []domain.AuditEntry {

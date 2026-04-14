@@ -3,10 +3,13 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -37,16 +40,27 @@ func (h *Handler) Router() *gin.Engine {
 	auth.POST("/auth/logout", h.logout)
 	auth.GET("/health", h.health)
 	auth.GET("/dashboard", h.dashboard)
+	auth.GET("/system/health", h.systemHealth)
+	auth.GET("/sessions", h.listSessions)
+	auth.DELETE("/sessions/:session", h.deleteSession)
+	auth.GET("/system/snapshot", h.exportSnapshot)
+	auth.POST("/system/snapshot/restore", h.restoreSnapshot)
 	auth.GET("/buckets", h.listBuckets)
 	auth.POST("/buckets", h.createBucket)
+	auth.GET("/buckets/:bucket/policy", h.getBucketPolicy)
+	auth.POST("/buckets/:bucket/policy/validate", h.validateBucketPolicy)
+	auth.PUT("/buckets/:bucket/policy", h.putBucketPolicy)
 	auth.PATCH("/buckets/:bucket/visibility", h.patchBucketVisibility)
 	auth.DELETE("/buckets/:bucket", h.deleteBucket)
 	auth.GET("/users", h.listUsers)
 	auth.POST("/users", h.createUser)
 	auth.GET("/users/:user", h.getUser)
+	auth.GET("/users/:user/dependencies", h.getUserDependencies)
+	auth.GET("/users/:user/effective-permissions", h.getUserEffectivePermissions)
 	auth.PATCH("/users/:user/status", h.patchUserStatus)
 	auth.DELETE("/users/:user", h.deleteUser)
 	auth.PUT("/users/:user/bucket-permissions", h.putUserPermissions)
+	auth.PUT("/users/batch/bucket-permissions", h.putBatchUserPermissions)
 	auth.GET("/groups", h.listGroups)
 	auth.POST("/groups", h.createGroup)
 	auth.DELETE("/groups/:group", h.deleteGroup)
@@ -57,6 +71,7 @@ func (h *Handler) Router() *gin.Engine {
 	auth.PATCH("/users/:user/access-keys/:key", h.patchAccessKey)
 	auth.DELETE("/users/:user/access-keys/:key", h.deleteAccessKey)
 	auth.GET("/audit-logs", h.listAuditLogs)
+	auth.GET("/audit-logs/export", h.exportAuditLogs)
 
 	h.mountFrontend(router)
 	return router
@@ -74,7 +89,7 @@ func (h *Handler) login(c *gin.Context) {
 	ctx, cancel := h.timeoutContext(c)
 	defer cancel()
 
-	result, err := h.service.Login(ctx, req.Username, req.Password)
+	result, err := h.service.Login(ctx, req.Username, req.Password, c.ClientIP(), c.Request.UserAgent())
 	if err != nil {
 		if errors.Is(err, service.ErrUnauthorized) {
 			writeError(c, http.StatusUnauthorized, domain.APIError{Code: "unauthorized", Message: "账号或密码错误，或不具备管理权限"})
@@ -124,6 +139,58 @@ func (h *Handler) dashboard(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": data})
 }
 
+func (h *Handler) systemHealth(c *gin.Context) {
+	ctx, cancel := h.timeoutContext(c)
+	defer cancel()
+	data, err := h.service.SystemHealth(ctx, mustMinIO(c))
+	if err != nil {
+		writeServiceError(c, service.NormalizeMinIOError(err))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": data})
+}
+
+func (h *Handler) listSessions(c *gin.Context) {
+	data, err := h.service.ListSessions(c.Request.Context(), mustSession(c).SessionID)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": data})
+}
+
+func (h *Handler) deleteSession(c *gin.Context) {
+	err := h.service.RevokeSession(c.Request.Context(), mustSession(c).SessionID, c.Param("session"))
+	h.writeMutation(c, err, mustSession(c).Username, "revoke_session", "session", c.Param("session"), "Revoke session "+c.Param("session"))
+}
+
+func (h *Handler) exportSnapshot(c *gin.Context) {
+	ctx, cancel := h.timeoutContext(c)
+	defer cancel()
+	data, err := h.service.BuildSnapshot(ctx, mustMinIO(c))
+	if err != nil {
+		writeServiceError(c, service.NormalizeMinIOError(err))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": data})
+}
+
+func (h *Handler) restoreSnapshot(c *gin.Context) {
+	var req struct {
+		ConfirmationToken string                `json:"confirmationToken"`
+		DefaultPassword   string                `json:"defaultPassword"`
+		Snapshot          domain.ConfigSnapshot `json:"snapshot"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, domain.APIError{Code: "bad_request", Message: "请求参数错误"})
+		return
+	}
+	ctx, cancel := h.timeoutContext(c)
+	defer cancel()
+	err := h.service.RestoreSnapshot(ctx, mustSession(c).Username, mustMinIO(c), req.Snapshot, req.DefaultPassword, req.ConfirmationToken)
+	h.writeMutation(c, err, mustSession(c).Username, "restore_snapshot", "snapshot", req.Snapshot.Endpoint, "Restore configuration snapshot")
+}
+
 func (h *Handler) listBuckets(c *gin.Context) {
 	ctx, cancel := h.timeoutContext(c)
 	defer cancel()
@@ -147,6 +214,43 @@ func (h *Handler) createBucket(c *gin.Context) {
 	defer cancel()
 	err := h.service.CreateBucket(ctx, mustMinIO(c), req.Name)
 	h.writeMutation(c, err, mustSession(c).Username, "create_bucket", "bucket", req.Name, "Create bucket "+req.Name)
+}
+
+func (h *Handler) getBucketPolicy(c *gin.Context) {
+	ctx, cancel := h.timeoutContext(c)
+	defer cancel()
+	data, err := h.service.GetBucketPolicy(ctx, mustMinIO(c), c.Param("bucket"))
+	if err != nil {
+		writeServiceError(c, service.NormalizeMinIOError(err))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": data})
+}
+
+func (h *Handler) validateBucketPolicy(c *gin.Context) {
+	var req struct {
+		Policy string `json:"policy"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, domain.APIError{Code: "bad_request", Message: "请求参数错误"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": h.service.ValidateBucketPolicy(c.Param("bucket"), req.Policy)})
+}
+
+func (h *Handler) putBucketPolicy(c *gin.Context) {
+	var req struct {
+		Policy string `json:"policy"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, domain.APIError{Code: "bad_request", Message: "请求参数错误"})
+		return
+	}
+	bucket := c.Param("bucket")
+	ctx, cancel := h.timeoutContext(c)
+	defer cancel()
+	err := h.service.SetBucketPolicy(ctx, mustMinIO(c), bucket, req.Policy)
+	h.writeMutation(c, err, mustSession(c).Username, "set_bucket_policy", "bucket", bucket, "Update bucket policy")
 }
 
 func (h *Handler) patchBucketVisibility(c *gin.Context) {
@@ -197,17 +301,53 @@ func (h *Handler) getUser(c *gin.Context) {
 
 func (h *Handler) createUser(c *gin.Context) {
 	var req struct {
-		Name     string `json:"name"`
-		Password string `json:"password"`
+		Name     string           `json:"name"`
+		Password string           `json:"password"`
+		Role     domain.AdminRole `json:"role"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.Name == "" || req.Password == "" {
 		writeError(c, http.StatusBadRequest, domain.APIError{Code: "bad_request", Message: "用户名和密码不能为空"})
 		return
 	}
+	if req.Role == "" {
+		req.Role = domain.RoleUser
+	}
 	ctx, cancel := h.timeoutContext(c)
 	defer cancel()
-	err := h.service.CreateUser(ctx, mustMinIO(c), req.Name, req.Password)
+	err := h.service.CreateUser(ctx, mustMinIO(c), req.Name, req.Password, req.Role)
 	h.writeMutation(c, err, mustSession(c).Username, "create_user", "user", req.Name, "Create user "+req.Name)
+}
+
+func (h *Handler) getUserDependencies(c *gin.Context) {
+	ctx, cancel := h.timeoutContext(c)
+	defer cancel()
+	data, err := h.service.UserDependencies(ctx, mustMinIO(c), c.Param("user"))
+	if err != nil {
+		writeServiceError(c, service.NormalizeMinIOError(err))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": data})
+}
+
+func (h *Handler) getUserEffectivePermissions(c *gin.Context) {
+	ctx, cancel := h.timeoutContext(c)
+	defer cancel()
+	user, err := h.service.GetUser(ctx, mustMinIO(c), c.Param("user"))
+	if err != nil {
+		writeServiceError(c, service.NormalizeMinIOError(err))
+		return
+	}
+	groups, err := h.service.ListGroups(ctx, mustMinIO(c))
+	if err != nil {
+		writeServiceError(c, service.NormalizeMinIOError(err))
+		return
+	}
+	buckets, err := h.service.ListBuckets(ctx, mustMinIO(c))
+	if err != nil {
+		writeServiceError(c, service.NormalizeMinIOError(err))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": h.service.EffectivePermissions(user, groups, buckets)})
 }
 
 func (h *Handler) patchUserStatus(c *gin.Context) {
@@ -237,7 +377,7 @@ func (h *Handler) deleteUser(c *gin.Context) {
 
 func (h *Handler) putUserPermissions(c *gin.Context) {
 	var req struct {
-		ConfirmationToken string                            `json:"confirmationToken"`
+		ConfirmationToken string                               `json:"confirmationToken"`
 		Permissions       map[string]domain.PermissionTemplate `json:"permissions"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -249,6 +389,22 @@ func (h *Handler) putUserPermissions(c *gin.Context) {
 	defer cancel()
 	err := h.service.UpdateUserPermissions(ctx, mustSession(c).Username, mustMinIO(c), user, req.Permissions, req.ConfirmationToken)
 	h.writeMutation(c, err, mustSession(c).Username, "update_user_permissions", "user", user, "Overwrite user bucket permissions")
+}
+
+func (h *Handler) putBatchUserPermissions(c *gin.Context) {
+	var req struct {
+		ConfirmationToken string                               `json:"confirmationToken"`
+		Users             []string                             `json:"users"`
+		Permissions       map[string]domain.PermissionTemplate `json:"permissions"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, domain.APIError{Code: "bad_request", Message: "请求参数错误"})
+		return
+	}
+	ctx, cancel := h.timeoutContext(c)
+	defer cancel()
+	err := h.service.BatchUpdateUserPermissions(ctx, mustSession(c).Username, mustMinIO(c), req.Users, req.Permissions, req.ConfirmationToken)
+	h.writeMutation(c, err, mustSession(c).Username, "batch_update_user_permissions", "user_batch", strings.Join(req.Users, ","), "Overwrite bucket permissions for multiple users")
 }
 
 func (h *Handler) listGroups(c *gin.Context) {
@@ -301,7 +457,7 @@ func (h *Handler) putGroupMembers(c *gin.Context) {
 
 func (h *Handler) putGroupPermissions(c *gin.Context) {
 	var req struct {
-		ConfirmationToken string                            `json:"confirmationToken"`
+		ConfirmationToken string                               `json:"confirmationToken"`
 		Permissions       map[string]domain.PermissionTemplate `json:"permissions"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -373,12 +529,61 @@ func (h *Handler) deleteAccessKey(c *gin.Context) {
 
 func (h *Handler) listAuditLogs(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
-	data, err := h.service.ListAudits(c.Request.Context(), limit)
+	filter := service.AuditFilter{
+		Actor:        c.Query("actor"),
+		Action:       c.Query("action"),
+		ResourceType: c.Query("resourceType"),
+		Result:       c.Query("result"),
+		Query:        c.Query("query"),
+		Limit:        limit,
+	}
+	if from := c.Query("from"); from != "" {
+		if parsed, err := time.Parse(time.RFC3339, from); err == nil {
+			filter.From = &parsed
+		}
+	}
+	if to := c.Query("to"); to != "" {
+		if parsed, err := time.Parse(time.RFC3339, to); err == nil {
+			filter.To = &parsed
+		}
+	}
+	data, err := h.service.ListAudits(c.Request.Context(), filter)
 	if err != nil {
 		writeServiceError(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": data})
+}
+
+func (h *Handler) exportAuditLogs(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "500"))
+	filter := service.AuditFilter{
+		Actor:        c.Query("actor"),
+		Action:       c.Query("action"),
+		ResourceType: c.Query("resourceType"),
+		Result:       c.Query("result"),
+		Query:        c.Query("query"),
+		Limit:        limit,
+	}
+	if from := c.Query("from"); from != "" {
+		if parsed, err := time.Parse(time.RFC3339, from); err == nil {
+			filter.From = &parsed
+		}
+	}
+	if to := c.Query("to"); to != "" {
+		if parsed, err := time.Parse(time.RFC3339, to); err == nil {
+			filter.To = &parsed
+		}
+	}
+	format := c.DefaultQuery("format", "json")
+	body, contentType, err := h.service.ExportAudits(c.Request.Context(), filter, format)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.Header("Content-Type", contentType)
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="audit-logs.%s"`, format))
+	c.Data(http.StatusOK, contentType, body)
 }
 
 func (h *Handler) authMiddleware() gin.HandlerFunc {
@@ -400,6 +605,13 @@ func (h *Handler) authMiddleware() gin.HandlerFunc {
 		}
 		c.Set("session", session)
 		c.Set("minioClient", client)
+		if session.Role == domain.RoleReadOnlyAdmin && c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
+			if c.FullPath() != "/api/auth/logout" {
+				writeError(c, http.StatusForbidden, domain.APIError{Code: "permission_denied", Message: "只读管理员不可执行写操作"})
+				c.Abort()
+				return
+			}
+		}
 		c.Next()
 	}
 }

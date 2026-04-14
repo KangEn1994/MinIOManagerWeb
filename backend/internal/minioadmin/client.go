@@ -1,6 +1,7 @@
 package minioadmin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,23 @@ import (
 )
 
 var policyNamePattern = regexp.MustCompile(`^mw_bucket_(.+)_(ro|rw|rwd)$`)
+
+const (
+	builtinGlobalAdminPolicyName = "consoleAdmin"
+	managedGlobalAdminPolicyName = "mw_global_admin"
+	managedReadOnlyPolicyName    = "mw_readonly_admin"
+)
+
+type bucketPolicyDocument struct {
+	Statement []bucketPolicyStatement `json:"Statement"`
+}
+
+type bucketPolicyStatement struct {
+	Effect    string `json:"Effect"`
+	Principal any    `json:"Principal"`
+	Action    any    `json:"Action"`
+	Resource  any    `json:"Resource"`
+}
 
 type Client struct {
 	endpoint string
@@ -56,9 +74,18 @@ func (c *Client) NewSession(accessKey, secretKey string) (*SessionClient, error)
 }
 
 func (c *SessionClient) ValidateAdmin(ctx context.Context) error {
-	_, err := c.admin.ServerInfo(ctx)
-	if err != nil {
-		return fmt.Errorf("validate admin: %w", err)
+	if _, err := c.admin.ServerInfo(ctx); err == nil {
+		return nil
+	}
+
+	if _, err := c.s3.ListBuckets(ctx); err != nil {
+		return fmt.Errorf("validate bucket access: %w", err)
+	}
+	if _, err := c.admin.ListUsers(ctx); err != nil {
+		return fmt.Errorf("validate user access: %w", err)
+	}
+	if _, err := c.admin.ListGroups(ctx); err != nil {
+		return fmt.Errorf("validate group access: %w", err)
 	}
 	return nil
 }
@@ -135,12 +162,42 @@ func (c *SessionClient) GetBucketVisibility(ctx context.Context, name string) (d
 	if strings.TrimSpace(policy) == "" {
 		return domain.BucketVisibilityPrivate, nil
 	}
-	if strings.Contains(policy, "\"Principal\":\"*\"") || strings.Contains(policy, "\"Principal\": \"*\"") {
-		if strings.Contains(policy, "s3:GetObject") {
-			return domain.BucketVisibilityPublicRead, nil
+
+	var doc bucketPolicyDocument
+	if err := json.Unmarshal([]byte(policy), &doc); err != nil {
+		return "", fmt.Errorf("parse bucket policy: %w", err)
+	}
+	if isPublicReadBucketPolicy(name, doc) {
+		return domain.BucketVisibilityPublicRead, nil
+	}
+	return domain.BucketVisibilityCustom, nil
+}
+
+func (c *SessionClient) GetBucketPolicy(ctx context.Context, name string) (domain.BucketPolicy, error) {
+	policy, err := c.s3.GetBucketPolicy(ctx, name)
+	if err != nil {
+		return domain.BucketPolicy{}, fmt.Errorf("get bucket policy: %w", err)
+	}
+
+	trimmed := strings.TrimSpace(policy)
+	visibility := domain.BucketVisibilityPrivate
+	if trimmed != "" {
+		var doc bucketPolicyDocument
+		if err := json.Unmarshal([]byte(trimmed), &doc); err != nil {
+			return domain.BucketPolicy{}, fmt.Errorf("parse bucket policy: %w", err)
+		}
+		if isPublicReadBucketPolicy(name, doc) {
+			visibility = domain.BucketVisibilityPublicRead
+		} else {
+			visibility = domain.BucketVisibilityCustom
 		}
 	}
-	return domain.BucketVisibilityPrivate, nil
+
+	return domain.BucketPolicy{
+		Bucket:     name,
+		Visibility: visibility,
+		Policy:     prettyJSON(trimmed),
+	}, nil
 }
 
 func (c *SessionClient) SetBucketVisibility(ctx context.Context, name string, visibility domain.BucketVisibility) error {
@@ -165,6 +222,20 @@ func (c *SessionClient) SetBucketVisibility(ctx context.Context, name string, vi
 	}
 }
 
+func (c *SessionClient) SetBucketPolicy(ctx context.Context, name, policy string) error {
+	trimmed := strings.TrimSpace(policy)
+	if trimmed == "" {
+		return c.s3.SetBucketPolicy(ctx, name, "")
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &doc); err != nil {
+		return fmt.Errorf("invalid bucket policy json: %w", err)
+	}
+
+	return c.s3.SetBucketPolicy(ctx, name, prettyJSON(trimmed))
+}
+
 func (c *SessionClient) ListUsers(ctx context.Context) ([]domain.UserSummary, error) {
 	users, err := c.admin.ListUsers(ctx)
 	if err != nil {
@@ -180,13 +251,15 @@ func (c *SessionClient) ListUsers(ctx context.Context) ([]domain.UserSummary, er
 	out := make([]domain.UserSummary, 0, len(users))
 	for _, name := range names {
 		info := users[name]
-		direct, final, err := c.resolveUserPermissions(ctx, name, info.MemberOf)
+		direct, final, role, err := c.resolveUserPermissions(ctx, name, info.MemberOf)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, domain.UserSummary{
 			Name:              name,
 			Status:            string(info.Status),
+			Role:              role,
+			IsGlobalAdmin:     role == domain.RoleGlobalAdmin,
 			MemberOf:          normalizeStrings(info.MemberOf),
 			DirectPermissions: normalizePermissionBindings(direct),
 			FinalPermissions:  normalizePermissionBindings(final),
@@ -200,22 +273,58 @@ func (c *SessionClient) GetUser(ctx context.Context, user string) (domain.UserSu
 	if err != nil {
 		return domain.UserSummary{}, fmt.Errorf("get user: %w", err)
 	}
-	direct, final, err := c.resolveUserPermissions(ctx, user, info.MemberOf)
+	direct, final, role, err := c.resolveUserPermissions(ctx, user, info.MemberOf)
 	if err != nil {
 		return domain.UserSummary{}, err
 	}
 	return domain.UserSummary{
 		Name:              user,
 		Status:            string(info.Status),
+		Role:              role,
+		IsGlobalAdmin:     role == domain.RoleGlobalAdmin,
 		MemberOf:          normalizeStrings(info.MemberOf),
 		DirectPermissions: normalizePermissionBindings(direct),
 		FinalPermissions:  normalizePermissionBindings(final),
 	}, nil
 }
 
-func (c *SessionClient) CreateUser(ctx context.Context, user, secret string) error {
+func (c *SessionClient) ResolveCurrentRole(ctx context.Context, username string) (domain.AdminRole, error) {
+	policies, err := c.currentDirectPoliciesForUser(ctx, username)
+	if err != nil {
+		return domain.RoleGlobalAdmin, nil
+	}
+	switch {
+	case containsString(policies, managedReadOnlyPolicyName):
+		return domain.RoleReadOnlyAdmin, nil
+	case containsString(policies, builtinGlobalAdminPolicyName), containsString(policies, managedGlobalAdminPolicyName):
+		return domain.RoleGlobalAdmin, nil
+	default:
+		return domain.RoleGlobalAdmin, nil
+	}
+}
+
+func (c *SessionClient) CreateUser(ctx context.Context, user, secret string, role domain.AdminRole) error {
 	if err := c.admin.AddUser(ctx, user, secret); err != nil {
 		return fmt.Errorf("create user: %w", err)
+	}
+	if role == "" || role == domain.RoleUser {
+		return nil
+	}
+	policyName, err := c.ensureManagedRolePolicy(ctx, role)
+	if err != nil {
+		if cleanupErr := c.admin.RemoveUser(ctx, user); cleanupErr != nil {
+			return fmt.Errorf("ensure managed role policy: %w (rollback remove user: %v)", err, cleanupErr)
+		}
+		return fmt.Errorf("ensure managed role policy: %w", err)
+	}
+	if _, err := c.admin.AttachPolicy(ctx, madmin.PolicyAssociationReq{
+		User:     user,
+		Policies: []string{policyName},
+	}); err != nil {
+		if cleanupErr := c.admin.RemoveUser(ctx, user); cleanupErr != nil {
+			return fmt.Errorf("attach role policy: %w (rollback remove user: %v)", err, cleanupErr)
+		}
+		return fmt.Errorf("attach role policy: %w", err)
 	}
 	return nil
 }
@@ -412,29 +521,34 @@ func (c *SessionClient) ApplyGroupBucketPermissions(ctx context.Context, group s
 	return c.reconcilePolicies(ctx, current, desired, "", group)
 }
 
-func (c *SessionClient) GetUserDependencies(ctx context.Context, user string) (map[string]any, error) {
+func (c *SessionClient) GetUserDependencies(ctx context.Context, user string) (domain.UserDependencyDetails, error) {
 	info, err := c.admin.GetUserInfo(ctx, user)
 	if err != nil {
-		return nil, fmt.Errorf("get user info: %w", err)
+		return domain.UserDependencyDetails{}, fmt.Errorf("get user info: %w", err)
 	}
 	accounts, err := c.admin.ListServiceAccounts(ctx, user)
 	if err != nil {
-		return nil, fmt.Errorf("list access keys: %w", err)
+		return domain.UserDependencyDetails{}, fmt.Errorf("list access keys: %w", err)
 	}
 	mappings, err := c.admin.GetPolicyEntities(ctx, madmin.PolicyEntitiesQuery{
 		Users: []string{user},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("get policy entities: %w", err)
+		return domain.UserDependencyDetails{}, fmt.Errorf("get policy entities: %w", err)
 	}
 	directPolicies := []string{}
 	if len(mappings.UserMappings) > 0 {
-		directPolicies = mappings.UserMappings[0].Policies
+		directPolicies = normalizeStrings(mappings.UserMappings[0].Policies)
 	}
-	return map[string]any{
-		"memberOf":      info.MemberOf,
-		"serviceKeys":   len(accounts.Accounts),
-		"directPolicies": directPolicies,
+	serviceKeys := make([]string, 0, len(accounts.Accounts))
+	for _, account := range accounts.Accounts {
+		serviceKeys = append(serviceKeys, account.AccessKey)
+	}
+	sort.Strings(serviceKeys)
+	return domain.UserDependencyDetails{
+		MemberOf:       normalizeStrings(info.MemberOf),
+		ServiceKeys:    serviceKeys,
+		DirectPolicies: directPolicies,
 	}, nil
 }
 
@@ -464,7 +578,7 @@ func (c *SessionClient) ClearUserDependencies(ctx context.Context, user string) 
 			return fmt.Errorf("delete access key %s: %w", account.AccessKey, err)
 		}
 	}
-	policies, err := c.currentManagedPoliciesForUser(ctx, user)
+	policies, err := c.currentDirectPoliciesForUser(ctx, user)
 	if err != nil {
 		return err
 	}
@@ -480,19 +594,27 @@ func (c *SessionClient) ClearUserDependencies(ctx context.Context, user string) 
 	return nil
 }
 
-func (c *SessionClient) resolveUserPermissions(ctx context.Context, user string, groups []string) ([]domain.PermissionBinding, []domain.PermissionBinding, error) {
+func (c *SessionClient) resolveUserPermissions(ctx context.Context, user string, groups []string) ([]domain.PermissionBinding, []domain.PermissionBinding, domain.AdminRole, error) {
 	result, err := c.admin.GetPolicyEntities(ctx, madmin.PolicyEntitiesQuery{
 		Users: []string{user},
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("get user policy entities: %w", err)
+		return nil, nil, domain.RoleUser, fmt.Errorf("get user policy entities: %w", err)
 	}
 
 	direct := []domain.PermissionBinding{}
 	final := map[string]domain.PermissionBinding{}
+	role := domain.RoleUser
 
 	if len(result.UserMappings) > 0 {
-		direct = policiesToBindings(result.UserMappings[0].Policies, "direct")
+		directPolicies := normalizeStrings(result.UserMappings[0].Policies)
+		direct = policiesToBindings(directPolicies, "direct")
+		switch {
+		case containsString(directPolicies, managedReadOnlyPolicyName):
+			role = domain.RoleReadOnlyAdmin
+		case containsString(directPolicies, builtinGlobalAdminPolicyName), containsString(directPolicies, managedGlobalAdminPolicyName):
+			role = domain.RoleGlobalAdmin
+		}
 		for _, binding := range direct {
 			final[binding.Bucket] = binding
 		}
@@ -503,7 +625,7 @@ func (c *SessionClient) resolveUserPermissions(ctx context.Context, user string,
 			Groups: []string{member},
 		})
 		if err != nil {
-			return nil, nil, fmt.Errorf("get group policy entities: %w", err)
+			return nil, nil, domain.RoleUser, fmt.Errorf("get group policy entities: %w", err)
 		}
 		if len(groupResult.GroupMappings) == 0 {
 			continue
@@ -515,7 +637,7 @@ func (c *SessionClient) resolveUserPermissions(ctx context.Context, user string,
 		}
 	}
 
-	return direct, mapBindings(final), nil
+	return direct, mapBindings(final), role, nil
 }
 
 func (c *SessionClient) resolveGroupPermissions(ctx context.Context, group string) ([]domain.PermissionBinding, error) {
@@ -532,6 +654,14 @@ func (c *SessionClient) resolveGroupPermissions(ctx context.Context, group strin
 }
 
 func (c *SessionClient) currentManagedPoliciesForUser(ctx context.Context, user string) ([]string, error) {
+	policies, err := c.currentDirectPoliciesForUser(ctx, user)
+	if err != nil {
+		return nil, err
+	}
+	return filterManagedPolicies(policies), nil
+}
+
+func (c *SessionClient) currentDirectPoliciesForUser(ctx context.Context, user string) ([]string, error) {
 	result, err := c.admin.GetPolicyEntities(ctx, madmin.PolicyEntitiesQuery{
 		Users: []string{user},
 	})
@@ -541,7 +671,7 @@ func (c *SessionClient) currentManagedPoliciesForUser(ctx context.Context, user 
 	if len(result.UserMappings) == 0 {
 		return []string{}, nil
 	}
-	return filterManagedPolicies(result.UserMappings[0].Policies), nil
+	return normalizeStrings(result.UserMappings[0].Policies), nil
 }
 
 func (c *SessionClient) currentManagedPoliciesForGroup(ctx context.Context, group string) ([]string, error) {
@@ -755,4 +885,250 @@ func normalizePermissionBindings(items []domain.PermissionBinding) []domain.Perm
 		return []domain.PermissionBinding{}
 	}
 	return items
+}
+
+func (c *SessionClient) ensureGlobalAdminPolicy(ctx context.Context) error {
+	return c.admin.AddCannedPolicy(ctx, managedGlobalAdminPolicyName, []byte(globalAdminPolicyDocument()))
+}
+
+func globalAdminPolicyDocument() string {
+	payload := map[string]any{
+		"Version": "2012-10-17",
+		"Statement": []map[string]any{
+			{
+				"Effect":   "Allow",
+				"Action":   []string{"admin:*"},
+				"Resource": []string{"arn:aws:s3:::*"},
+			},
+			{
+				"Effect":   "Allow",
+				"Action":   []string{"s3:*"},
+				"Resource": []string{"arn:aws:s3:::*", "arn:aws:s3:::*/*"},
+			},
+		},
+	}
+
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["admin:*"],"Resource":["arn:aws:s3:::*"]},{"Effect":"Allow","Action":["s3:*"],"Resource":["arn:aws:s3:::*","arn:aws:s3:::*/*"]}]}`
+	}
+	return string(encoded)
+}
+
+func prettyJSON(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+
+	var out bytes.Buffer
+	if err := json.Indent(&out, []byte(trimmed), "", "  "); err != nil {
+		return trimmed
+	}
+	return out.String()
+}
+
+func isPublicReadBucketPolicy(bucket string, doc bucketPolicyDocument) bool {
+	if len(doc.Statement) == 0 {
+		return false
+	}
+
+	expectedResource := fmt.Sprintf("arn:aws:s3:::%s/*", bucket)
+	for _, statement := range doc.Statement {
+		if !strings.EqualFold(statement.Effect, "Allow") || !isAnonymousPrincipal(statement.Principal) {
+			return false
+		}
+
+		actions := normalizePolicyValues(statement.Action)
+		resources := normalizePolicyValues(statement.Resource)
+		if len(actions) == 0 || len(resources) == 0 {
+			return false
+		}
+
+		for _, action := range actions {
+			if action != "s3:GetObject" {
+				return false
+			}
+		}
+		for _, resource := range resources {
+			if resource != expectedResource {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+func isAnonymousPrincipal(principal any) bool {
+	switch value := principal.(type) {
+	case string:
+		return value == "*"
+	case map[string]any:
+		for _, item := range value {
+			values := normalizePolicyValues(item)
+			if len(values) == 0 {
+				return false
+			}
+			for _, current := range values {
+				if current != "*" {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func normalizePolicyValues(value any) []string {
+	switch current := value.(type) {
+	case string:
+		return []string{current}
+	case []string:
+		return current
+	case []any:
+		out := make([]string, 0, len(current))
+		for _, item := range current {
+			text, ok := item.(string)
+			if !ok {
+				return nil
+			}
+			out = append(out, text)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func (c *SessionClient) InspectBucketSafety(ctx context.Context, bucket string) (domain.BucketSafetyReport, error) {
+	report := domain.BucketSafetyReport{
+		Bucket:           bucket,
+		VersioningStatus: "unknown",
+	}
+
+	versioning, err := c.s3.GetBucketVersioning(ctx, bucket)
+	if err == nil {
+		switch {
+		case versioning.Enabled():
+			report.VersioningStatus = "enabled"
+		case versioning.Suspended():
+			report.VersioningStatus = "suspended"
+		default:
+			report.VersioningStatus = "disabled"
+		}
+	}
+
+	for object := range c.s3.ListObjects(ctx, bucket, minio.ListObjectsOptions{Recursive: true}) {
+		if object.Err != nil {
+			return report, fmt.Errorf("list bucket objects: %w", object.Err)
+		}
+		report.ObjectCount++
+	}
+
+	for upload := range c.s3.ListIncompleteUploads(ctx, bucket, "", true) {
+		if upload.Err != nil {
+			return report, fmt.Errorf("list incomplete uploads: %w", upload.Err)
+		}
+		report.IncompleteUploadCount++
+	}
+
+	if report.VersioningStatus == "enabled" || report.VersioningStatus == "suspended" {
+		for object := range c.s3.ListObjects(ctx, bucket, minio.ListObjectsOptions{Recursive: true, WithVersions: true}) {
+			if object.Err != nil {
+				return report, fmt.Errorf("list bucket versions: %w", object.Err)
+			}
+			report.VersionedEntryCount++
+		}
+	}
+
+	report.DeleteBlocked = report.ObjectCount > 0 || report.IncompleteUploadCount > 0 || report.VersionedEntryCount > 0
+	return report, nil
+}
+
+func (c *SessionClient) SystemHealth(ctx context.Context) (domain.SystemHealth, error) {
+	now := time.Now().UTC()
+	info, infoErr := c.admin.ServerInfo(ctx)
+	storage, storageErr := c.admin.StorageInfo(ctx)
+	if infoErr != nil && storageErr != nil {
+		return domain.SystemHealth{}, fmt.Errorf("system health unavailable: %w", infoErr)
+	}
+
+	health := domain.SystemHealth{
+		ServerTime: now,
+		Mode:       info.Mode,
+	}
+
+	if info.DeploymentID != "" {
+		health.DeploymentID = info.DeploymentID
+	}
+	if len(info.Servers) > 0 {
+		health.Version = info.Servers[0].Version
+	}
+
+	if storageErr == nil {
+		for _, disk := range storage.Disks {
+			health.StorageUsed += disk.UsedSpace
+			health.StorageRaw += disk.TotalSpace
+		}
+	}
+
+	health.Checks = []domain.HealthCheck{
+		{Name: "minio_connection", Status: statusFromError(infoErr), Message: messageFromError("MinIO ServerInfo", infoErr)},
+		{Name: "storage_info", Status: statusFromError(storageErr), Message: messageFromError("StorageInfo", storageErr)},
+	}
+
+	return health, nil
+}
+
+func ensureRolePolicyDocument(role domain.AdminRole) (string, string, error) {
+	switch role {
+	case domain.RoleGlobalAdmin:
+		return managedGlobalAdminPolicyName, globalAdminPolicyDocument(), nil
+	case domain.RoleReadOnlyAdmin:
+		return managedReadOnlyPolicyName, readOnlyAdminPolicyDocument(), nil
+	default:
+		return "", "", fmt.Errorf("unsupported role: %s", role)
+	}
+}
+
+func (c *SessionClient) ensureManagedRolePolicy(ctx context.Context, role domain.AdminRole) (string, error) {
+	name, document, err := ensureRolePolicyDocument(role)
+	if err != nil {
+		return "", err
+	}
+	if err := c.admin.AddCannedPolicy(ctx, name, []byte(document)); err != nil {
+		return "", err
+	}
+	return name, nil
+}
+
+func readOnlyAdminPolicyDocument() string {
+	// MinIO admin APIs still require broad admin capabilities for the operations this UI
+	// needs to read. The web app enforces read-only behavior at the session/middleware layer.
+	return globalAdminPolicyDocument()
+}
+
+func statusFromError(err error) string {
+	if err != nil {
+		return "error"
+	}
+	return "ok"
+}
+
+func messageFromError(label string, err error) string {
+	if err != nil {
+		return fmt.Sprintf("%s failed: %s", label, err.Error())
+	}
+	return label + " ok"
+}
+
+func containsString(items []string, target string) bool {
+	for _, item := range items {
+		if item == target {
+			return true
+		}
+	}
+	return false
 }

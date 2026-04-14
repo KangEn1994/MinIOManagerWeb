@@ -4,13 +4,18 @@ MinIO 基础管理后台，面向单个 MinIO 实例的管理员使用场景。
 
 ## 功能
 
-- 管理桶的 `private` / `public-read`
+- 管理桶的 `private` / `public-read` / `custom`
 - 创建桶、删除空桶
 - 新增/删除用户，启用/停用用户
+- 支持创建 `global_admin` 和 `readonly_admin`
 - 分组管理与批量成员维护
 - 用户与分组的桶权限模板绑定
+- 用户删除依赖检查与最终权限汇总
 - Access Key 创建、停用、删除
-- 审计日志
+- 审计日志查询与导出
+- 后台会话管理与撤销
+- 系统健康检查与部署检查项
+- 配置快照导出 / 恢复
 - 高风险操作二次确认
 
 ## 目录
@@ -42,6 +47,12 @@ go run ./cmd/server
 ## 关键环境变量
 
 参考 [deploy/.env.example](/Users/kang_en/codex/MinIOManagerWeb/deploy/.env.example)。
+
+## 角色模型
+
+- `user`: 普通对象存储用户，不能登录当前后台
+- `global_admin`: 全局管理员，可登录后台并执行所有管理操作
+- `readonly_admin`: 只读管理员，可登录后台查看配置与审计，但不能执行写操作
 
 ## 与现有 MinIO 集成部署
 
@@ -326,16 +337,18 @@ server {
 
 - `https://minio-manager.example.com`
 
-使用你现有的 MinIO 管理员账号登录。
+使用你现有的 MinIO 管理员账号登录，或者使用通过本后台创建的 `global_admin` / `readonly_admin` 账号登录。
 
 这个后台会直接调用 MinIO 的管理能力，所以它管理的是你当前在线运行的 MinIO：
 
-- 桶 public/private
+- 桶 private/public-read/custom
 - 删除空桶
 - 用户新增删除
 - 分组管理
 - 桶权限模板
 - Access Key 管理
+- 后台会话管理
+- 审计日志与配置快照
 
 ### 5. 部署建议
 
