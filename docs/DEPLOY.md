@@ -129,6 +129,8 @@ docker compose up -d
 - `DOCKER_REGISTRY`
 - `DOCKER_IMAGE_REPOSITORY`
 
+这 4 个都放在 `Repository secrets` 中即可。
+
 镜像标签默认包含：
 
 - 分支名

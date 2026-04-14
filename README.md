@@ -344,14 +344,12 @@ server {
 - push `v*` 标签
 - 手动触发 `workflow_dispatch`
 
-需要在 GitHub 仓库中配置：
+需要在 GitHub 仓库中配置这 4 个 `Repository secrets`：
 
-- `Secrets`
-  - `DOCKER_USERNAME`
-  - `DOCKER_PASSWORD`
-- `Variables`
-  - `DOCKER_REGISTRY`
-  - `DOCKER_IMAGE_REPOSITORY`
+- `DOCKER_USERNAME`
+- `DOCKER_PASSWORD`
+- `DOCKER_REGISTRY`
+- `DOCKER_IMAGE_REPOSITORY`
 
 变量示例：
 

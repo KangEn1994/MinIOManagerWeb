@@ -9,8 +9,8 @@ on:
   workflow_dispatch:
 
 env:
-  REGISTRY: ${{ vars.DOCKER_REGISTRY }}
-  IMAGE_REPOSITORY: ${{ vars.DOCKER_IMAGE_REPOSITORY }}
+  REGISTRY: ${{ secrets.DOCKER_REGISTRY }}
+  IMAGE_REPOSITORY: ${{ secrets.DOCKER_IMAGE_REPOSITORY }}
 
 jobs:
   docker:
@@ -23,8 +23,8 @@ jobs:
 
       - name: Validate Docker Hub settings
         run: |
-          test -n "${{ env.REGISTRY }}" || (echo "Missing variable DOCKER_REGISTRY" && exit 1)
-          test -n "${{ env.IMAGE_REPOSITORY }}" || (echo "Missing variable DOCKER_IMAGE_REPOSITORY" && exit 1)
+          test -n "${{ env.REGISTRY }}" || (echo "Missing secret DOCKER_REGISTRY" && exit 1)
+          test -n "${{ env.IMAGE_REPOSITORY }}" || (echo "Missing secret DOCKER_IMAGE_REPOSITORY" && exit 1)
           test -n "${{ secrets.DOCKER_USERNAME }}" || (echo "Missing secret DOCKER_USERNAME" && exit 1)
           test -n "${{ secrets.DOCKER_PASSWORD }}" || (echo "Missing secret DOCKER_PASSWORD" && exit 1)
 
