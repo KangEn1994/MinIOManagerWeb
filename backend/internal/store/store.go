@@ -10,12 +10,12 @@ import (
 type Session struct {
 	ID                 string    `gorm:"primaryKey"`
 	Username           string    `gorm:"index;not null"`
-	Role               string    `gorm:"index;not null"`
-	SourceIP           string    `gorm:"not null"`
-	UserAgent          string    `gorm:"not null"`
+	Role               string    `gorm:"index;not null;default:global_admin"`
+	SourceIP           string    `gorm:"not null;default:''"`
+	UserAgent          string    `gorm:"not null;default:''"`
 	EncryptedAccessKey string    `gorm:"not null"`
 	EncryptedSecretKey string    `gorm:"not null"`
-	LastSeenAt         time.Time `gorm:"index;not null"`
+	LastSeenAt         time.Time `gorm:"index;not null;default:'1970-01-01 00:00:00'"`
 	ExpiresAt          time.Time `gorm:"index;not null"`
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
@@ -41,8 +41,8 @@ type ConfirmationToken struct {
 	ResourceType string    `gorm:"index;not null"`
 	ResourceID   string    `gorm:"index;not null"`
 	Summary      string    `gorm:"not null"`
-	Prompt       string    `gorm:"not null"`
-	Expected     string    `gorm:"not null"`
+	Prompt       string    `gorm:"not null;default:''"`
+	Expected     string    `gorm:"not null;default:''"`
 	ExpiresAt    time.Time `gorm:"index;not null"`
 	UsedAt       *time.Time
 	CreatedAt    time.Time
