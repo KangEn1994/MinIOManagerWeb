@@ -6,8 +6,9 @@ COPY frontend/ ./
 RUN npm run build
 
 FROM golang:1.24-alpine AS backend-builder
+RUN apk add --no-cache build-base
 WORKDIR /app/backend
-COPY backend/go.mod ./
+COPY backend/go.mod backend/go.sum ./
 RUN go mod download
 COPY backend/ ./
 RUN CGO_ENABLED=1 GOOS=linux go build -o /out/minio-manager-web ./cmd/server
