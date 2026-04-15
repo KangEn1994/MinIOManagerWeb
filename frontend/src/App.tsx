@@ -325,7 +325,7 @@ function App() {
     setDialog((prev) => (prev ? { ...prev, busy: true } : prev))
     try {
       await dialog.onConfirm(dialogInput.trim())
-      setDialog((current) => (current === dialog ? null : current))
+      setDialog(null)
       setDialogInput('')
     } catch (error) {
       handleApiError(error)
